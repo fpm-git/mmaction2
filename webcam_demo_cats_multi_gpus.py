@@ -11,6 +11,7 @@ from mmengine.dataset import Compose, pseudo_collate
 from mmaction.apis import init_recognizer
 from mmaction.utils import get_str_type
 from mmaction.utils.stream_source import VideoStream
+from websocket_server import WebsocketServer
 
 import os
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
@@ -27,11 +28,15 @@ EXCLUED_STEPS = [
 ]
 
 # global
-stop_signal = Event() # signal to terminate threads
-active_streams_dict = {} 
-average_size = 1 # num of frames used for moving average (affects smoothing of predictions)
-threshold = 0.01 # minimum confidence score for predictions to be displayed
-shoot_threshold = 0.9 
+stop_signal = Event()  # signal to terminate threads
+active_streams_dict = {}
+# num of frames used for moving average (affects smoothing of predictions)
+average_size = 1
+threshold = 0.01  # minimum confidence score for predictions to be displayed
+shoot_threshold = 0.9
+websocket_clients = []
+websocket_stop_signal = Event()
+
 
 def show_results(frame_queues, result_queues):
     """Display or save annotated frames"""
@@ -42,10 +47,10 @@ def show_results(frame_queues, result_queues):
         msg = 'Waiting for action ...'
         for stream_name, frame_queue in frame_queues.items():
             if not frame_queue:
-                continue  
-            
+                continue
+
             frame = frame_queue[-1]  # get the latest frame from queue
-         
+
             if len(result_queues[stream_name]) != 0:
                 text_info_dict[stream_name] = {}
                 results_data = result_queues[stream_name].popleft()
@@ -53,17 +58,29 @@ def show_results(frame_queues, result_queues):
 
                 for i, result in enumerate(results):
                     selected_label, score = result
+
+                    # THIS IS WHERE THE SCRATCHING DECISION IS MADE FROM THE RESULTS
                     if score < threshold:
                         break
+
+                    # TODO --> THis is where we need to inject a websocket server to send a shoot command to the turret
+                    # cat turret does socket_queue.get(block=False) to get a message that says "Shoot" or no
+
                     location = (10, 40 + i * 30)
                     text = f"{selected_label}: {round(score * 100, 2)}"
                     text_info_dict[stream_name][location] = text
                     if score > shoot_threshold and selected_label == 'scratching':
                         print(f"[Info] Scratching detected for {stream_name}")
 
-                    cv2.putText(frame, text, location, FONTFACE, FONTSCALE, 
-                            FONTCOLOR, THICKNESS, LINETYPE)
-                
+                        for client in websocket_clients:
+                            try:
+                                client.send("Shoot")
+                            except Exception as e:
+                                print(f"failed to send message {e}")
+
+                    cv2.putText(frame, text, location, FONTFACE, FONTSCALE,
+                                FONTCOLOR, THICKNESS, LINETYPE)
+
             elif len(text_info_dict[stream_name]) != 0:
                 for location, text in text_info_dict[stream_name].items():
                     cv2.putText(frame, text, location, FONTFACE, FONTSCALE,
@@ -71,15 +88,15 @@ def show_results(frame_queues, result_queues):
             else:
                 cv2.putText(frame, msg, (0, 40), FONTFACE, FONTSCALE, MSGCOLOR,
                             THICKNESS, LINETYPE)
-            
+
             """save output images if using micron system"""
             # file_name = f'output_images/{stream_name}.jpg' #png
             # temp_file = f'output_images/{stream_name}_temp.jpg'
-            
+
             # success = cv2.imwrite(temp_file, frame)
             # if success:
             #     os.replace(temp_file, file_name)
-         
+
             # cv2.imwrite(file_name, frame)
             # frame_num += 1
             cv2.imshow(f"Camera - {stream_name}", frame)
@@ -88,7 +105,7 @@ def show_results(frame_queues, result_queues):
         if key == 27 or key in [ord('q'), ord('Q')]:
             print("[Info] Stopping all video streams...")
             stop_signal.set()
-            break  
+            break
     cv2.destroyAllWindows()
 
 
@@ -104,7 +121,7 @@ def inference(stream_name, frame_queue, result_queue, model, data, label, test_p
                 if data['img_shape'] is None:
                     data['img_shape'] = frame_queue.popleft().shape[:2]
             elif active_streams_dict[stream_name].stopped:
-                return  
+                return
         if stop_signal.is_set():
             break
 
@@ -120,9 +137,9 @@ def inference(stream_name, frame_queue, result_queue, model, data, label, test_p
             if "CUDA out of memory" in str(e):
                 print("[Error] CUDA runtime error")
                 stop_signal.set()
-                return  
+                return
             else:
-                raise 
+                raise
 
         scores = np.array(result.pred_score.tolist())
         score_cache.append(scores)
@@ -132,7 +149,8 @@ def inference(stream_name, frame_queue, result_queue, model, data, label, test_p
             scores_avg = scores_sum / average_size
             num_selected_labels = min(len(label), 5)
             score_tuples = tuple(zip(label, scores_avg))
-            score_sorted = sorted(score_tuples, key=itemgetter(1), reverse=True)
+            score_sorted = sorted(
+                score_tuples, key=itemgetter(1), reverse=True)
             results = score_sorted[:num_selected_labels]
 
             results_dict = {"frame_src": stream_name, "scores": results}
@@ -171,10 +189,33 @@ def fetch_frames(stream, frame_queue):
     while not stream.stopped and not stop_signal.is_set():
         frame, _, stopped = stream.get_frame()
         if stopped or stop_signal.is_set():
-            break  
+            break
         if frame is not None:
-            frame_queue.append(frame)  
+            frame_queue.append(frame)
         time.sleep(0.01)
+
+
+def new_websocket_client(client, server):
+    print("New client connected.")
+    websocket_clients.append(client)
+    while True:
+        message = client.recv()
+        if not message:
+            break
+        print(f"Received message: {message}")
+        client.send(message)  # echo message back
+    print("Client disconnected.")
+    websocket_clients.remove(client)
+
+
+def run_websocket_server():
+    port = 8765
+    server = WebsocketServer(host='localhost', port=port)
+    server.set_fn_new_client(new_websocket_client)
+    print(f"Websocket server started, listening on {port}")
+    while not websocket_stop_signal.is_set():
+        server.handle_request()  # handle requests
+        time.sleep(0.1)  # Avoid busy waiting
 
 
 def main():
@@ -194,6 +235,10 @@ def main():
     result_queues = {}
     threads = []
 
+    # create websocket for turret communication
+    server_thread = Thread(target=run_websocket_server)
+    threads.append(server_thread)
+
     for idx, (name, video_path) in enumerate(stream_sources.items()):
         gpu_id = idx % gpu_count  # assign GPUs
         gpu_name = torch.cuda.get_device_name(gpu_id)
@@ -209,27 +254,31 @@ def main():
         frame_queues[name] = deque(maxlen=sample_length)
         result_queues[name] = deque(maxlen=1)
 
-        t_fetch = Thread(target=fetch_frames, args=(video_stream_widget, frame_queues[name]), daemon=True)
-        t_infer = Thread(target=inference, 
-                         args=(name, frame_queues[name], result_queues[name], model, data, label, test_pipeline, sample_length), 
+        t_fetch = Thread(target=fetch_frames, args=(
+            video_stream_widget, frame_queues[name]), daemon=True)
+        t_infer = Thread(target=inference,
+                         args=(name, frame_queues[name], result_queues[name],
+                               model, data, label, test_pipeline, sample_length),
                          daemon=True)
 
         threads.extend([t_fetch, t_infer])
 
     t_show = Thread(target=show_results, args=(frame_queues, result_queues))
     threads.append(t_show)
-    
+
     for t in threads:
         t.start()
 
     while any(not stream.stopped for stream in active_streams_dict.values()):
         time.sleep(1)
     stop_signal.set()
-    
+    websocket_stop_signal.set() # Signal to stop WebSocket server
+
     for t in threads:
         t.join()
 
     print("[Info] All threads stopped, exiting program.")
+
 
 if __name__ == '__main__':
     main()
