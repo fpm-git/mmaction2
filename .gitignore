@@ -1,5 +1,6 @@
 # ignore models, too big to store in repo
 best_models/
+output_images/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
