@@ -12,6 +12,7 @@ from mmaction.apis import init_recognizer
 from mmaction.utils import get_str_type
 from mmaction.utils.stream_source import VideoStream
 from websockets.sync.server import serve
+from websockets.exceptions import ConnectionClosedError
 
 import os
 os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
@@ -69,7 +70,7 @@ def write_frames_to_disk(write_queues):
                 os.replace(temp_file, file_name)
 
             cv2.imwrite(file_name, frame)
-            
+
 
 
 def show_results(frame_queues, result_queues, write_queues):
@@ -104,7 +105,7 @@ def show_results(frame_queues, result_queues, write_queues):
                         print(f"[Info] Scratching detected for {stream_name}")
                         for client in websocket_clients:
                             client.send("Shoot")
-                                
+
                     cv2.putText(frame, text, location, FONTFACE, FONTSCALE,
                                 FONTCOLOR, THICKNESS, LINETYPE)
 
@@ -214,16 +215,22 @@ def fetch_frames(stream, frame_queue):
             frame_queue.append(frame)
         time.sleep(0.01)
 
-def websocket_client_disconnect(client, server): 
+
+def websocket_client_disconnect(client):
     print("client disconnected")
     websocket_clients.remove(client)
+
 
 def new_websocket_client_handler(client):
     print("client connected.")
     websocket_clients.add(client)
-    for message in client:
-        pass
-    websocket_clients.remove(client)
+    try:
+        while True:
+            message = client.recv()
+            pass
+    except ConnectionClosedError:
+        websocket_client_disconnect(client)
+
 
 def run_websocket_server():
     with serve(new_websocket_client_handler, host="0.0.0.0", port=8765) as server:
