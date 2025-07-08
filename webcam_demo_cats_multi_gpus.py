@@ -72,14 +72,11 @@ def show_results(frame_queues, result_queues):
                     if score > shoot_threshold and selected_label == 'scratching':
                         print(f"[Info] Scratching detected for {stream_name}")
 
-                        for client in websocket_clients:
-                            try:
-                                client.send("Shoot")
-                            except Exception as e:
-                                print(f"failed to send message {e}")
-
-                    cv2.putText(frame, text, location, FONTFACE, FONTSCALE,
+                        cv2.putText(frame, text, location, FONTFACE, FONTSCALE,
                                 FONTCOLOR, THICKNESS, LINETYPE)
+
+                        file_name = f'detections/{stream_name}_{int(time.time())}.jpg' #png
+                        cv2.imwrite(file_name, frame)
 
             elif len(text_info_dict[stream_name]) != 0:
                 for location, text in text_info_dict[stream_name].items():
@@ -99,14 +96,14 @@ def show_results(frame_queues, result_queues):
 
             # cv2.imwrite(file_name, frame)
             # frame_num += 1
-            cv2.imshow(f"Camera - {stream_name}", frame)
+            # cv2.imshow(f"Camera - {stream_name}", frame)
 
-        key = cv2.waitKey(1)
-        if key == 27 or key in [ord('q'), ord('Q')]:
-            print("[Info] Stopping all video streams...")
-            stop_signal.set()
-            break
-    cv2.destroyAllWindows()
+        # key = cv2.waitKey(1)
+        # if key == 27 or key in [ord('q'), ord('Q')]:
+        #     print("[Info] Stopping all video streams...")
+        #     stop_signal.set()
+        #     break
+    # cv2.destroyAllWindows()
 
 
 def inference(stream_name, frame_queue, result_queue, model, data, label, test_pipeline, sample_length):
@@ -198,14 +195,19 @@ def fetch_frames(stream, frame_queue):
 def new_websocket_client(client, server):
     print("New client connected.")
     websocket_clients.append(client)
-    while True:
-        message = client.recv()
-        if not message:
-            break
-        print(f"Received message: {message}")
-        client.send(message)  # echo message back
-    print("Client disconnected.")
-    websocket_clients.remove(client)
+
+    try:
+        while True:
+            message = client.recv()
+            if not message:
+                break
+            print(f"Received message: {message}")
+            client.send(message)  # echo message back
+    except Exception as e:
+        print("client disconnected with error: {e}")
+    finally:
+        print("Client disconnected.")
+        websocket_clients.remove(client)
 
 
 def run_websocket_server():
@@ -227,8 +229,9 @@ def main():
     label_path = 'cats_labels.txt'
 
     stream_sources = {
-        "Video_1": 'test_videos/download_test_1.mp4',
+        #"Video_1": 'test_videos/download_test_1.mp4',
         # "Video_2": 0,
+        "Video_1": 'rtsp://localhost:8554/rtsp_in'
     }
 
     frame_queues = {}
